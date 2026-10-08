@@ -1,0 +1,43 @@
+name: Build OBS Source Replay
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ["v*"]
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Import official OBS build system
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/obsproject/obs-plugintemplate.git "$env:RUNNER_TEMP/obs-template"
+          Copy-Item "$env:RUNNER_TEMP/obs-template/.github/actions" ".github/actions" -Recurse -Force
+          Copy-Item "$env:RUNNER_TEMP/obs-template/.github/scripts" ".github/scripts" -Recurse -Force
+          Copy-Item "$env:RUNNER_TEMP/obs-template/cmake" "cmake" -Recurse -Force
+          Copy-Item "$env:RUNNER_TEMP/obs-template/build-aux" "build-aux" -Recurse -Force
+      - uses: ./.github/actions/build-plugin
+        with: {target: x64, config: Release}
+      - uses: ./.github/actions/package-plugin
+        with: {target: x64, config: Release, package: true, codesign: false}
+      - uses: actions/upload-artifact@v4
+        with: {name: OBS-Source-Replay-Windows-x64, path: release/obs-source-replay-0.3.0-windows-x64*.*}
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Import official OBS build system
+        shell: zsh
+        run: |
+          git clone --depth 1 https://github.com/obsproject/obs-plugintemplate.git "$RUNNER_TEMP/obs-template"
+          cp -R "$RUNNER_TEMP/obs-template/.github/actions" ".github/actions"
+          cp -R "$RUNNER_TEMP/obs-template/.github/scripts" ".github/scripts"
+          cp -R "$RUNNER_TEMP/obs-template/cmake" "cmake"
+          cp -R "$RUNNER_TEMP/obs-template/build-aux" "build-aux"
+      - uses: ./.github/actions/build-plugin
+        with: {target: macos-universal, config: Release, codesign: false}
+      - uses: ./.github/actions/package-plugin
+        with: {target: macos-universal, config: Release, package: true, codesign: false}
+      - uses: actions/upload-artifact@v4
+        with: {name: OBS-Source-Replay-macOS-Universal, path: release/obs-source-replay-0.3.0-macos-universal*.*}
