@@ -28,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Import official OBS build system
-        shell: zsh
+        shell: bash
         run: |
           git clone --depth 1 https://github.com/obsproject/obs-plugintemplate.git "$RUNNER_TEMP/obs-template"
           cp -R "$RUNNER_TEMP/obs-template/.github/actions" ".github/actions"
