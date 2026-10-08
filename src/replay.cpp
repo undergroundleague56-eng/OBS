@@ -34,22 +34,65 @@ bool SourceReplay::start(obs_source_t*s,int sec){
 void SourceReplay::stop(){running_=false;if(source_)obs_source_remove_audio_capture_callback(source_,&on_audio,this);if(video_)video_output_disconnect2(video_,&on_frame,this);video_=nullptr;if(view_){obs_view_remove(view_);obs_view_destroy(view_);view_=nullptr;}if(source_){obs_source_release(source_);source_=nullptr;}std::lock_guard<std::mutex>l(mutex_);for(auto&p:packets_)av_packet_free(&p.pkt);packets_.clear();free_encoders();last_pts_=AV_NOPTS_VALUE;frame_index_=0;}
 bool SourceReplay::init_video_encoder(uint32_t w,uint32_t h,uint32_t fn,uint32_t fd){
  fps_={(int)fn,(int)fd};
- const AVCodec*c=nullptr;
- #ifdef __APPLE__
- c=avcodec_find_encoder_by_name("h264_videotoolbox");
- #endif
- if(!c)c=avcodec_find_encoder_by_name("libx264");
- if(!c)c=avcodec_find_encoder(AV_CODEC_ID_H264);
- if(!c){last_error_="No H.264 encoder available";return false;}
- video_codec_=avcodec_alloc_context3(c);
- if(!video_codec_){last_error_="Could not allocate H.264 encoder";return false;}
- video_codec_->width=w; video_codec_->height=h; video_codec_->time_base=av_inv_q(fps_); video_codec_->framerate=fps_;
- video_codec_->pix_fmt=AV_PIX_FMT_YUV420P; video_codec_->gop_size=std::max(1,(int)(fn/fd)); video_codec_->max_b_frames=0;
- if(!strstr(c->name,"videotoolbox")){av_opt_set(video_codec_->priv_data,"preset","veryfast",0);av_opt_set(video_codec_->priv_data,"tune","zerolatency",0);av_opt_set(video_codec_->priv_data,"crf","20",0);}
- if(avcodec_open2(video_codec_,c,nullptr)<0){last_error_=std::string("H.264 encoder failed: ")+c->name;return false;}
- video_frame_=av_frame_alloc(); if(!video_frame_){last_error_="Could not allocate video frame";return false;}
- video_frame_->format=video_codec_->pix_fmt;video_frame_->width=w;video_frame_->height=h;
- if(av_frame_get_buffer(video_frame_,32)<0){last_error_="Could not allocate video frame buffer";return false;} return true;}
+
+ const AVCodec *codec = nullptr;
+ const char *last_codec_name = nullptr;
+
+ const char *candidates[] = {
+#ifdef __APPLE__
+	"h264_videotoolbox",
+#endif
+	"libx264",
+	"h264"
+ };
+
+ for (const char *name : candidates) {
+	const AVCodec *candidate = avcodec_find_encoder_by_name(name);
+	if (!candidate)
+		continue;
+
+	AVCodecContext *ctx = avcodec_alloc_context3(candidate);
+	if (!ctx)
+		continue;
+
+	ctx->width=w;
+	ctx->height=h;
+	ctx->time_base=av_inv_q(fps_);
+	ctx->framerate=fps_;
+	ctx->pix_fmt=AV_PIX_FMT_YUV420P;
+	ctx->gop_size=std::max(1,(int)(fn/fd));
+	ctx->max_b_frames=0;
+
+	if (!strstr(candidate->name,"videotoolbox")) {
+		av_opt_set(ctx->priv_data,"preset","veryfast",0);
+		av_opt_set(ctx->priv_data,"tune","zerolatency",0);
+		av_opt_set(ctx->priv_data,"crf","20",0);
+	}
+
+	last_codec_name = candidate->name;
+	if (avcodec_open2(ctx,candidate,nullptr) == 0) {
+		video_codec_ = ctx;
+		codec = candidate;
+		break;
+	}
+
+	avcodec_free_context(&ctx);
+ }
+
+ if (!video_codec_) {
+	last_error_ = std::string("H.264 encoder failed: ") +
+		(last_codec_name ? last_codec_name : "none");
+	return false;
+ }
+
+ video_frame_=av_frame_alloc();
+ if(!video_frame_){last_error_="Could not allocate video frame";return false;}
+ video_frame_->format=video_codec_->pix_fmt;
+ video_frame_->width=w;
+ video_frame_->height=h;
+ if(av_frame_get_buffer(video_frame_,32)<0){last_error_="Could not allocate video frame buffer";return false;}
+ return true;
+}
 bool SourceReplay::init_audio_encoder(uint32_t rate,uint32_t ch){auto*c=avcodec_find_encoder(AV_CODEC_ID_AAC);if(!c){last_error_="No AAC encoder available";return false;}audio_codec_=avcodec_alloc_context3(c);audio_codec_->sample_rate=rate;audio_codec_->sample_fmt=AV_SAMPLE_FMT_FLTP;audio_codec_->time_base={1,(int)rate};av_channel_layout_default(&audio_codec_->ch_layout,ch);audio_codec_->bit_rate=160000;if(avcodec_open2(audio_codec_,c,nullptr)<0){last_error_="AAC encoder failed";return false;}audio_frame_=av_frame_alloc();audio_frame_->format=audio_codec_->sample_fmt;audio_frame_->sample_rate=rate;av_channel_layout_copy(&audio_frame_->ch_layout,&audio_codec_->ch_layout);audio_frame_capacity_=audio_codec_->frame_size>0?audio_codec_->frame_size:1024;audio_frame_->nb_samples=audio_frame_capacity_;return av_frame_get_buffer(audio_frame_,0)>=0;}
 void SourceReplay::free_encoders(){if(sws_)sws_freeContext(sws_),sws_=nullptr;if(swr_)swr_free(&swr_);av_frame_free(&video_frame_);av_frame_free(&audio_frame_);avcodec_free_context(&video_codec_);avcodec_free_context(&audio_codec_);}
 void SourceReplay::on_frame(void*p,video_data*f){((SourceReplay*)p)->handle_frame(f);}
