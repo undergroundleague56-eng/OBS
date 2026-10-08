@@ -70,10 +70,25 @@ bool SourceReplay::init_video_encoder(uint32_t w,uint32_t h,uint32_t fn,uint32_t
   ctx->width=(int)ew;
   ctx->height=(int)eh;
   ctx->time_base={1,fps};
-  ctx->framerate=fps_;
-  ctx->pix_fmt = strstr(candidate->name,"videotoolbox")
-    ? AV_PIX_FMT_NV12
-    : AV_PIX_FMT_YUV420P;
+  ctx->framerate={0,1};
+  // Use a pixel format explicitly advertised by this encoder.
+  ctx->pix_fmt = AV_PIX_FMT_NONE;
+  if (candidate->pix_fmts) {
+   const enum AVPixelFormat preferred[] = {
+    AV_PIX_FMT_NV12, AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV422P, AV_PIX_FMT_YUV444P
+   };
+   for (auto pf : preferred) {
+    for (const enum AVPixelFormat *p = candidate->pix_fmts; *p != AV_PIX_FMT_NONE; ++p) {
+     if (*p == pf) { ctx->pix_fmt = pf; break; }
+    }
+    if (ctx->pix_fmt != AV_PIX_FMT_NONE) break;
+   }
+  }
+  if (ctx->pix_fmt == AV_PIX_FMT_NONE) {
+   failures += std::string(name) + ": no supported pixel format; ";
+   avcodec_free_context(&ctx);
+   continue;
+  }
 
   ctx->bit_rate=4000000;
   ctx->gop_size=std::max(1,fps);
