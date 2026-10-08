@@ -42,23 +42,27 @@ bool SourceReplay::init_video_encoder(uint32_t w,uint32_t h,uint32_t fn,uint32_t
   return false;
  }
 
+ std::string failures;
+
  const char *candidates[] = {
 #ifdef __APPLE__
   "h264_videotoolbox",
 #endif
   "libx264"
  };
- const char *last_codec_name = nullptr;
- int last_err = 0;
 
  for (const char *name : candidates) {
   const AVCodec *candidate = avcodec_find_encoder_by_name(name);
-  if (!candidate)
+  if (!candidate) {
+   failures += std::string(name) + ": encoder not found; ";
    continue;
+  }
 
   AVCodecContext *ctx = avcodec_alloc_context3(candidate);
-  if (!ctx)
+  if (!ctx) {
+   failures += std::string(name) + ": could not allocate context; ";
    continue;
+  }
 
   ctx->width=(int)ew;
   ctx->height=(int)eh;
@@ -68,33 +72,31 @@ bool SourceReplay::init_video_encoder(uint32_t w,uint32_t h,uint32_t fn,uint32_t
     ? AV_PIX_FMT_NV12
     : AV_PIX_FMT_YUV420P;
 
-  // Both VideoToolbox and x264 accept an explicit bitrate more reliably
-  // than relying on codec defaults when opened through libavcodec.
   ctx->bit_rate=6000000;
-  ctx->rc_max_rate=6000000;
-  ctx->rc_buffer_size=12000000;
   ctx->gop_size=std::max(1,(int)(fn/fd));
   ctx->max_b_frames=0;
 
-  if (!strstr(candidate->name,"videotoolbox")) {
+  if (strstr(candidate->name,"videotoolbox")) {
+   ctx->rc_max_rate=6000000;
+   ctx->rc_buffer_size=12000000;
+  } else {
    av_opt_set(ctx->priv_data,"preset","veryfast",0);
    av_opt_set(ctx->priv_data,"tune","zerolatency",0);
    av_opt_set(ctx->priv_data,"crf","20",0);
   }
 
-  last_codec_name=candidate->name;
   const int err=avcodec_open2(ctx,candidate,nullptr);
   if(err==0){
    video_codec_=ctx;
    break;
   }
 
-  last_err=err;
+  char errbuf[AV_ERROR_MAX_STRING_SIZE]{};
+  av_strerror(err,errbuf,sizeof(errbuf));
+  failures += std::string(candidate->name) + ": " + errbuf + "; ";
   avcodec_free_context(&ctx);
  }
 
- // Keep the replay functional even on macOS builds where H.264 encoders
- // are unavailable or reject the current hardware/software configuration.
  // Matroska can carry MPEG-4 video together with AAC audio.
  if(!video_codec_){
   const AVCodec *fallback=avcodec_find_encoder(AV_CODEC_ID_MPEG4);
@@ -112,23 +114,22 @@ bool SourceReplay::init_video_encoder(uint32_t w,uint32_t h,uint32_t fn,uint32_t
     const int err=avcodec_open2(ctx,fallback,nullptr);
     if(err==0){
      video_codec_=ctx;
-     last_codec_name=fallback->name;
-     last_err=0;
     }else{
-     last_err=err;
+     char errbuf[AV_ERROR_MAX_STRING_SIZE]{};
+     av_strerror(err,errbuf,sizeof(errbuf));
+     failures += std::string(fallback->name) + ": " + errbuf + "; ";
      avcodec_free_context(&ctx);
     }
+   } else {
+    failures += "mpeg4: encoder not found; ";
    }
+  } else {
+   failures += "mpeg4: encoder not found; ";
   }
  }
 
  if(!video_codec_){
-  char errbuf[AV_ERROR_MAX_STRING_SIZE]{};
-  av_strerror(last_err,errbuf,sizeof(errbuf));
-  last_error_=std::string("Video encoder failed: ")+
-   (last_codec_name?last_codec_name:"none")+
-   " ("+(last_err?errbuf:"encoder not found")+
-   ", "+std::to_string(w)+"x"+std::to_string(h)+")";
+  last_error_="Video encoder failed ("+std::to_string(w)+"x"+std::to_string(h)+"): "+failures;
   return false;
  }
 
