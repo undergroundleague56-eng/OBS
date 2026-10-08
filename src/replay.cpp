@@ -75,9 +75,11 @@ bool SourceReplay::init_video_encoder(uint32_t w,uint32_t h,uint32_t fn,uint32_t
     ? AV_PIX_FMT_NV12
     : AV_PIX_FMT_YUV420P;
 
-  ctx->bit_rate=6000000;
+  ctx->bit_rate=4000000;
   ctx->gop_size=std::max(1,fps);
   ctx->max_b_frames=0;
+  ctx->sample_aspect_ratio={1,1};
+  ctx->color_range=AVCOL_RANGE_MPEG;
 
   if (strstr(candidate->name,"videotoolbox")) {
    ctx->rc_max_rate=6000000;
@@ -108,12 +110,14 @@ bool SourceReplay::init_video_encoder(uint32_t w,uint32_t h,uint32_t fn,uint32_t
    if(ctx){
     ctx->width=(int)ew;
     ctx->height=(int)eh;
-    ctx->time_base={static_cast<int>(fd),static_cast<int>(fn)};
+    ctx->time_base={1,fps};
     ctx->framerate=fps_;
     ctx->pix_fmt=AV_PIX_FMT_YUV420P;
-    ctx->bit_rate=6000000;
-    ctx->gop_size=std::max(1,(int)(fn/fd));
+    ctx->bit_rate=4000000;
+    ctx->gop_size=std::max(1,fps);
     ctx->max_b_frames=0;
+    ctx->sample_aspect_ratio={1,1};
+    ctx->color_range=AVCOL_RANGE_MPEG;
     const int err=avcodec_open2(ctx,fallback,nullptr);
     if(err==0){
      video_codec_=ctx;
