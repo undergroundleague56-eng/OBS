@@ -1,6 +1,7 @@
 #include "replay.hpp"
 #include <algorithm>
 #include <cstring>
+#include <cmath>
 static constexpr AVRational TB{1,90000};
 static AVPacket* cp(const AVPacket*s){auto*p=av_packet_alloc();if(!p||av_packet_ref(p,s)<0){av_packet_free(&p);return nullptr;}return p;}
 SourceReplay::SourceReplay(){avformat_network_init();}
@@ -33,7 +34,9 @@ bool SourceReplay::start(obs_source_t*s,int sec){
  obs_source_add_audio_capture_callback(source_,&on_audio,this); running_=true; return true;}
 void SourceReplay::stop(){running_=false;if(source_)obs_source_remove_audio_capture_callback(source_,&on_audio,this);if(video_)video_output_disconnect2(video_,&on_frame,this);video_=nullptr;if(view_){obs_view_remove(view_);obs_view_destroy(view_);view_=nullptr;}if(source_){obs_source_release(source_);source_=nullptr;}std::lock_guard<std::mutex>l(mutex_);for(auto&p:packets_)av_packet_free(&p.pkt);packets_.clear();free_encoders();last_pts_=AV_NOPTS_VALUE;frame_index_=0;}
 bool SourceReplay::init_video_encoder(uint32_t w,uint32_t h,uint32_t fn,uint32_t fd){
- fps_={(int)fn,(int)fd};
+ const double source_fps = (fn && fd) ? (double)fn / (double)fd : 0.0;
+ const int fps = std::clamp((int)std::lround(source_fps), 1, 240);
+ fps_={fps,1};
 
  const uint32_t ew = w & ~1u;
  const uint32_t eh = h & ~1u;
@@ -66,14 +69,14 @@ bool SourceReplay::init_video_encoder(uint32_t w,uint32_t h,uint32_t fn,uint32_t
 
   ctx->width=(int)ew;
   ctx->height=(int)eh;
-  ctx->time_base={static_cast<int>(fd),static_cast<int>(fn)};
+  ctx->time_base={1,fps};
   ctx->framerate=fps_;
   ctx->pix_fmt = strstr(candidate->name,"videotoolbox")
     ? AV_PIX_FMT_NV12
     : AV_PIX_FMT_YUV420P;
 
   ctx->bit_rate=6000000;
-  ctx->gop_size=std::max(1,(int)(fn/fd));
+  ctx->gop_size=std::max(1,fps);
   ctx->max_b_frames=0;
 
   if (strstr(candidate->name,"videotoolbox")) {
