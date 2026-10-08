@@ -5,10 +5,52 @@ static constexpr AVRational TB{1,90000};
 static AVPacket* cp(const AVPacket*s){auto*p=av_packet_alloc();if(!p||av_packet_ref(p,s)<0){av_packet_free(&p);return nullptr;}return p;}
 SourceReplay::SourceReplay(){avformat_network_init();}
 SourceReplay::~SourceReplay(){stop();avformat_network_deinit();}
-bool SourceReplay::start(obs_source_t*s,int sec){stop();if(!s)return false;source_=obs_source_get_ref(s);max_seconds_=std::clamp(sec,1,120);uint32_t w=obs_source_get_width(source_),h=obs_source_get_height(source_);if(!w||!h){stop();return false;}view_=obs_view_create();if(!view_)return false;video_=obs_view_add(view_);if(!video_)return false;obs_view_set_source(view_,0,source_);auto*i=video_output_get_info(video_);uint32_t vw=i&&i->width?i->width:w,vh=i&&i->height?i->height:h,fn=i&&i->fps_num?i->fps_num:60,fd=i&&i->fps_den?i->fps_den:1;conversion_.format=VIDEO_FORMAT_BGRA;conversion_.width=vw;conversion_.height=vh;conversion_.range=VIDEO_RANGE_FULL;conversion_.colorspace=VIDEO_CS_SRGB;if(!init_video_encoder(vw,vh,fn,fd))return false;obs_audio_info ai{};obs_get_audio_info(&ai);audio_rate_=ai.samples_per_sec?ai.samples_per_sec:48000;audio_channels_=get_audio_channels(ai.speakers);if(!audio_channels_)audio_channels_=2;if(!init_audio_encoder(audio_rate_,audio_channels_))return false;if(!video_output_connect(video_,&conversion_,&on_frame,this))return false;obs_source_add_audio_capture_callback(source_,&on_audio,this);running_=true;return true;}
+bool SourceReplay::start(obs_source_t*s,int sec){
+ stop(); last_error_.clear();
+ if(!s){last_error_="No source selected";return false;}
+ source_=obs_source_get_ref(s); max_seconds_=std::clamp(sec,1,120);
+ obs_video_info ovi{};
+ if(!obs_get_video_info(&ovi)){last_error_="OBS video output is not available";stop();return false;}
+ view_=obs_view_create();
+ if(!view_){last_error_="obs_view_create failed";return false;}
+ video_=obs_view_add2(view_,&ovi);
+ if(!video_){last_error_="obs_view_add2 failed";stop();return false;}
+ obs_view_set_source(view_,0,source_);
+ auto*i=video_output_get_info(video_);
+ uint32_t vw=i&&i->width?i->width:ovi.output_width;
+ uint32_t vh=i&&i->height?i->height:ovi.output_height;
+ uint32_t fn=i&&i->fps_num?i->fps_num:ovi.fps_num;
+ uint32_t fd=i&&i->fps_den?i->fps_den:ovi.fps_den;
+ if(!vw||!vh||!fn||!fd){last_error_="Invalid OBS video settings";stop();return false;}
+ conversion_.format=VIDEO_FORMAT_BGRA; conversion_.width=vw; conversion_.height=vh;
+ conversion_.range=VIDEO_RANGE_FULL; conversion_.colorspace=VIDEO_CS_SRGB;
+ if(!init_video_encoder(vw,vh,fn,fd)){if(last_error_.empty())last_error_="Video encoder initialization failed";stop();return false;}
+ obs_audio_info ai{}; obs_get_audio_info(&ai);
+ audio_rate_=ai.samples_per_sec?ai.samples_per_sec:48000;
+ audio_channels_=get_audio_channels(ai.speakers); if(!audio_channels_)audio_channels_=2;
+ if(!init_audio_encoder(audio_rate_,audio_channels_)){if(last_error_.empty())last_error_="Audio encoder initialization failed";stop();return false;}
+ if(!video_output_connect(video_,&conversion_,&on_frame,this)){last_error_="video_output_connect failed";stop();return false;}
+ obs_source_add_audio_capture_callback(source_,&on_audio,this); running_=true; return true;}
 void SourceReplay::stop(){running_=false;if(source_)obs_source_remove_audio_capture_callback(source_,&on_audio,this);if(video_)video_output_disconnect2(video_,&on_frame,this);video_=nullptr;if(view_){obs_view_remove(view_);obs_view_destroy(view_);view_=nullptr;}if(source_){obs_source_release(source_);source_=nullptr;}std::lock_guard<std::mutex>l(mutex_);for(auto&p:packets_)av_packet_free(&p.pkt);packets_.clear();free_encoders();last_pts_=AV_NOPTS_VALUE;frame_index_=0;}
-bool SourceReplay::init_video_encoder(uint32_t w,uint32_t h,uint32_t fn,uint32_t fd){fps_={(int)fn,(int)fd};auto*c=avcodec_find_encoder_by_name("libx264");if(!c)c=avcodec_find_encoder(AV_CODEC_ID_H264);if(!c)return false;video_codec_=avcodec_alloc_context3(c);video_codec_->width=w;video_codec_->height=h;video_codec_->time_base=av_inv_q(fps_);video_codec_->framerate=fps_;video_codec_->pix_fmt=AV_PIX_FMT_YUV420P;video_codec_->gop_size=std::max(1,(int)(fn/fd));video_codec_->max_b_frames=0;av_opt_set(video_codec_->priv_data,"preset","veryfast",0);av_opt_set(video_codec_->priv_data,"tune","zerolatency",0);av_opt_set(video_codec_->priv_data,"crf","20",0);if(avcodec_open2(video_codec_,c,nullptr)<0)return false;video_frame_=av_frame_alloc();video_frame_->format=video_codec_->pix_fmt;video_frame_->width=w;video_frame_->height=h;return av_frame_get_buffer(video_frame_,32)>=0;}
-bool SourceReplay::init_audio_encoder(uint32_t rate,uint32_t ch){auto*c=avcodec_find_encoder(AV_CODEC_ID_AAC);if(!c)return false;audio_codec_=avcodec_alloc_context3(c);audio_codec_->sample_rate=rate;audio_codec_->sample_fmt=AV_SAMPLE_FMT_FLTP;audio_codec_->time_base={1,(int)rate};av_channel_layout_default(&audio_codec_->ch_layout,ch);audio_codec_->bit_rate=160000;if(avcodec_open2(audio_codec_,c,nullptr)<0)return false;audio_frame_=av_frame_alloc();audio_frame_->format=audio_codec_->sample_fmt;audio_frame_->sample_rate=rate;av_channel_layout_copy(&audio_frame_->ch_layout,&audio_codec_->ch_layout);audio_frame_capacity_=audio_codec_->frame_size>0?audio_codec_->frame_size:1024;audio_frame_->nb_samples=audio_frame_capacity_;return av_frame_get_buffer(audio_frame_,0)>=0;}
+bool SourceReplay::init_video_encoder(uint32_t w,uint32_t h,uint32_t fn,uint32_t fd){
+ fps_={(int)fn,(int)fd};
+ const AVCodec*c=nullptr;
+ #ifdef __APPLE__
+ c=avcodec_find_encoder_by_name("h264_videotoolbox");
+ #endif
+ if(!c)c=avcodec_find_encoder_by_name("libx264");
+ if(!c)c=avcodec_find_encoder(AV_CODEC_ID_H264);
+ if(!c){last_error_="No H.264 encoder available";return false;}
+ video_codec_=avcodec_alloc_context3(c);
+ if(!video_codec_){last_error_="Could not allocate H.264 encoder";return false;}
+ video_codec_->width=w; video_codec_->height=h; video_codec_->time_base=av_inv_q(fps_); video_codec_->framerate=fps_;
+ video_codec_->pix_fmt=AV_PIX_FMT_YUV420P; video_codec_->gop_size=std::max(1,(int)(fn/fd)); video_codec_->max_b_frames=0;
+ if(!strstr(c->name,"videotoolbox")){av_opt_set(video_codec_->priv_data,"preset","veryfast",0);av_opt_set(video_codec_->priv_data,"tune","zerolatency",0);av_opt_set(video_codec_->priv_data,"crf","20",0);}
+ if(avcodec_open2(video_codec_,c,nullptr)<0){last_error_=std::string("H.264 encoder failed: ")+c->name;return false;}
+ video_frame_=av_frame_alloc(); if(!video_frame_){last_error_="Could not allocate video frame";return false;}
+ video_frame_->format=video_codec_->pix_fmt;video_frame_->width=w;video_frame_->height=h;
+ if(av_frame_get_buffer(video_frame_,32)<0){last_error_="Could not allocate video frame buffer";return false;} return true;}
+bool SourceReplay::init_audio_encoder(uint32_t rate,uint32_t ch){auto*c=avcodec_find_encoder(AV_CODEC_ID_AAC);if(!c){last_error_="No AAC encoder available";return false;}audio_codec_=avcodec_alloc_context3(c);audio_codec_->sample_rate=rate;audio_codec_->sample_fmt=AV_SAMPLE_FMT_FLTP;audio_codec_->time_base={1,(int)rate};av_channel_layout_default(&audio_codec_->ch_layout,ch);audio_codec_->bit_rate=160000;if(avcodec_open2(audio_codec_,c,nullptr)<0){last_error_="AAC encoder failed";return false;}audio_frame_=av_frame_alloc();audio_frame_->format=audio_codec_->sample_fmt;audio_frame_->sample_rate=rate;av_channel_layout_copy(&audio_frame_->ch_layout,&audio_codec_->ch_layout);audio_frame_capacity_=audio_codec_->frame_size>0?audio_codec_->frame_size:1024;audio_frame_->nb_samples=audio_frame_capacity_;return av_frame_get_buffer(audio_frame_,0)>=0;}
 void SourceReplay::free_encoders(){if(sws_)sws_freeContext(sws_),sws_=nullptr;if(swr_)swr_free(&swr_);av_frame_free(&video_frame_);av_frame_free(&audio_frame_);avcodec_free_context(&video_codec_);avcodec_free_context(&audio_codec_);}
 void SourceReplay::on_frame(void*p,video_data*f){((SourceReplay*)p)->handle_frame(f);}
 void SourceReplay::handle_frame(video_data*f){if(!running_||!f||!video_codec_||!f->data[0])return;std::lock_guard<std::mutex>l(mutex_);if(!sws_)sws_=sws_getContext(video_codec_->width,video_codec_->height,AV_PIX_FMT_BGRA,video_codec_->width,video_codec_->height,AV_PIX_FMT_YUV420P,SWS_FAST_BILINEAR,nullptr,nullptr,nullptr);if(!sws_||av_frame_make_writable(video_frame_)<0)return;const uint8_t*src[]={f->data[0]};int st[]={static_cast<int>(f->linesize[0])};sws_scale(sws_,src,st,0,video_codec_->height,video_frame_->data,video_frame_->linesize);video_frame_->pts=frame_index_++;if(avcodec_send_frame(video_codec_,video_frame_)<0)return;AVPacket*out=av_packet_alloc();while(out&&avcodec_receive_packet(video_codec_,out)==0){auto pts=av_rescale_q(out->pts,video_codec_->time_base,TB),dts=av_rescale_q(out->dts,video_codec_->time_base,TB);out->pts=pts;out->dts=dts;out->duration=out->duration>0?av_rescale_q(out->duration,video_codec_->time_base,TB):0;packets_.push_back({out,pts,dts,(out->flags&AV_PKT_FLAG_KEY)!=0,false});last_pts_=std::max(last_pts_,pts);out=av_packet_alloc();}av_packet_free(&out);trim_locked(last_pts_);}
