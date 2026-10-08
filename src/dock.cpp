@@ -89,7 +89,7 @@ void SourceReplayDock::toggle()
 	if (replay_.start(selected_, seconds_->value())) {
 		startStop_->setText("Stop buffer");
 	} else {
-		status_->setText("Failed to start");
+		status_->setText(QString("Failed to start: %1").arg(QString::fromStdString(replay_.last_error())));
 		obs_source_release(selected_);
 		selected_ = nullptr;
 	}
