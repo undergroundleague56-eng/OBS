@@ -22,6 +22,7 @@ public:
  bool save(const std::string&);
  bool running() const{return running_;}
  size_t buffered_seconds() const;
+ const std::string &last_error() const{return last_error_;}
 private:
  struct Packet{AVPacket*pkt;int64_t pts,dts;bool key,audio;};
  static void on_frame(void*,video_data*);
@@ -48,4 +49,5 @@ private:
  uint32_t audio_rate_=48000,audio_channels_=2;
  int audio_frame_capacity_=1024;
  std::atomic<bool>running_{false};
+ std::string last_error_;
 };
